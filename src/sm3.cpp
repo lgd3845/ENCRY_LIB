@@ -1,7 +1,9 @@
 #include "encrylib/sm3.h"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -65,14 +67,39 @@ constexpr std::uint32_t gg1(std::uint32_t x,
   return (x & y) | (~x & z);
 }
 
-std::uint32_t read_be32(const std::uint8_t* bytes) {
+std::uint32_t bswap32(std::uint32_t value) noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_bswap32(value);
+#else
+  return ((value & 0x000000ffU) << 24) | ((value & 0x0000ff00U) << 8) |
+         ((value & 0x00ff0000U) >> 8) | ((value & 0xff000000U) >> 24);
+#endif
+}
+
+std::uint32_t read_be32(const std::uint8_t* bytes) noexcept {
+  std::uint32_t value = 0;
+  std::memcpy(&value, bytes, sizeof(value));
+  if constexpr (std::endian::native == std::endian::little) {
+    return bswap32(value);
+  }
+  if constexpr (std::endian::native == std::endian::big) {
+    return value;
+  }
   return (static_cast<std::uint32_t>(bytes[0]) << 24) |
          (static_cast<std::uint32_t>(bytes[1]) << 16) |
          (static_cast<std::uint32_t>(bytes[2]) << 8) |
          static_cast<std::uint32_t>(bytes[3]);
 }
 
-void write_be32(std::uint32_t value, std::uint8_t* out) {
+void write_be32(std::uint32_t value, std::uint8_t* out) noexcept {
+  if constexpr (std::endian::native == std::endian::little) {
+    value = bswap32(value);
+  }
+  if constexpr (std::endian::native == std::endian::big ||
+                std::endian::native == std::endian::little) {
+    std::memcpy(out, &value, sizeof(value));
+    return;
+  }
   out[0] = static_cast<std::uint8_t>((value >> 24) & 0xffU);
   out[1] = static_cast<std::uint8_t>((value >> 16) & 0xffU);
   out[2] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
@@ -164,6 +191,11 @@ void Sm3::compress(const std::uint8_t block[64]) {
   for (std::size_t i = 0; i < 16; ++i) {
     w[i] = read_be32(block + i * 4);
   }
+#if defined(__clang__)
+#pragma clang loop unroll_count(52)
+#elif defined(__GNUC__)
+#pragma GCC unroll 52
+#endif
   for (std::size_t i = 16; i < 68; ++i) {
     w[i] = p1(w[i - 16] ^ w[i - 9] ^ rotl(w[i - 3], 15)) ^
            rotl(w[i - 13], 7) ^ w[i - 6];
@@ -178,6 +210,11 @@ void Sm3::compress(const std::uint8_t block[64]) {
   std::uint32_t g = state_[6];
   std::uint32_t h = state_[7];
 
+#if defined(__clang__)
+#pragma clang loop unroll_count(16)
+#elif defined(__GNUC__)
+#pragma GCC unroll 16
+#endif
   for (std::size_t j = 0; j < 16; ++j) {
     const std::uint32_t a12 = rotl(a, 12);
     const std::uint32_t ss1 = rotl(a12 + e + kTjRot[j], 7);
@@ -194,6 +231,11 @@ void Sm3::compress(const std::uint8_t block[64]) {
     e = p0(tt2);
   }
 
+#if defined(__clang__)
+#pragma clang loop unroll_count(48)
+#elif defined(__GNUC__)
+#pragma GCC unroll 48
+#endif
   for (std::size_t j = 16; j < 64; ++j) {
     const std::uint32_t a12 = rotl(a, 12);
     const std::uint32_t ss1 = rotl(a12 + e + kTjRot[j], 7);

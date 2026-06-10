@@ -16,16 +16,19 @@ std::span<const std::uint8_t> bytes_of(const std::string& s) {
 }
 
 template <typename Fn>
-double measure_ms(Fn&& fn) {
+double measure_seconds(Fn&& fn) {
   const auto start = std::chrono::steady_clock::now();
   fn();
   const auto end = std::chrono::steady_clock::now();
-  return std::chrono::duration<double, std::milli>(end - start).count();
+  return std::chrono::duration<double>(end - start).count();
 }
 
-double mib_per_second(std::size_t bytes, double ms) {
-  const double mib = static_cast<double>(bytes) / (1024.0 * 1024.0);
-  return mib / (ms / 1000.0);
+double bytes_to_gb(std::size_t bytes) {
+  return static_cast<double>(bytes) / 1'000'000'000.0;
+}
+
+double gb_per_second(std::size_t bytes, double seconds) {
+  return bytes_to_gb(bytes) / seconds;
 }
 
 std::vector<std::uint8_t> make_payload(std::size_t size) {
@@ -49,21 +52,26 @@ int main() {
       8U * 1024U * 1024U,
       32U * 1024U * 1024U,
       128U * 1024U * 1024U,
+      512U * 1024U * 1024U,
+      1'000'000'000U,
   };
 
-  std::cout << "size_bytes,encrypt_ms,decrypt_ms,encrypt_mib_s,decrypt_mib_s\n";
+  std::cout << "size_bytes,size_gb,encrypt_s,decrypt_s,encrypt_gb_s,decrypt_gb_s\n";
   std::cout << std::fixed << std::setprecision(3);
   for (const auto size : sizes) {
     const auto payload = make_payload(size);
-    auto blob = encrylib::encrypt_blob(enc_key, mac_key, payload, bytes_of(aad));
-    (void)encrylib::decrypt_blob(enc_key, mac_key, blob, bytes_of(aad));
+    if (size <= 128U * 1024U * 1024U) {
+      auto blob =
+          encrylib::encrypt_blob(enc_key, mac_key, payload, bytes_of(aad));
+      (void)encrylib::decrypt_blob(enc_key, mac_key, blob, bytes_of(aad));
+    }
 
     encrylib::EncryptedBlob measured_blob;
-    const double enc_ms = measure_ms([&] {
+    const double enc_s = measure_seconds([&] {
       measured_blob =
           encrylib::encrypt_blob(enc_key, mac_key, payload, bytes_of(aad));
     });
-    const double dec_ms = measure_ms([&] {
+    const double dec_s = measure_seconds([&] {
       const auto plain =
           encrylib::decrypt_blob(enc_key, mac_key, measured_blob, bytes_of(aad));
       if (plain.size() != payload.size()) {
@@ -71,9 +79,9 @@ int main() {
       }
     });
 
-    std::cout << size << "," << enc_ms << "," << dec_ms << ","
-              << mib_per_second(size, enc_ms) << ","
-              << mib_per_second(size, dec_ms) << "\n";
+    std::cout << size << "," << bytes_to_gb(size) << "," << enc_s << ","
+              << dec_s << "," << gb_per_second(size, enc_s) << ","
+              << gb_per_second(size, dec_s) << "\n";
   }
   return 0;
 }

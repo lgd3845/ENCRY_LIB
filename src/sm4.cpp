@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -89,14 +90,39 @@ constexpr auto kKeyT1 = make_transform_table<16, true>();
 constexpr auto kKeyT2 = make_transform_table<8, true>();
 constexpr auto kKeyT3 = make_transform_table<0, true>();
 
-std::uint32_t read_be32(const std::uint8_t* bytes) {
+std::uint32_t bswap32(std::uint32_t value) noexcept {
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_bswap32(value);
+#else
+  return ((value & 0x000000ffU) << 24) | ((value & 0x0000ff00U) << 8) |
+         ((value & 0x00ff0000U) >> 8) | ((value & 0xff000000U) >> 24);
+#endif
+}
+
+std::uint32_t read_be32(const std::uint8_t* bytes) noexcept {
+  std::uint32_t value = 0;
+  std::memcpy(&value, bytes, sizeof(value));
+  if constexpr (std::endian::native == std::endian::little) {
+    return bswap32(value);
+  }
+  if constexpr (std::endian::native == std::endian::big) {
+    return value;
+  }
   return (static_cast<std::uint32_t>(bytes[0]) << 24) |
          (static_cast<std::uint32_t>(bytes[1]) << 16) |
          (static_cast<std::uint32_t>(bytes[2]) << 8) |
          static_cast<std::uint32_t>(bytes[3]);
 }
 
-void write_be32(std::uint32_t value, std::uint8_t* out) {
+void write_be32(std::uint32_t value, std::uint8_t* out) noexcept {
+  if constexpr (std::endian::native == std::endian::little) {
+    value = bswap32(value);
+  }
+  if constexpr (std::endian::native == std::endian::big ||
+                std::endian::native == std::endian::little) {
+    std::memcpy(out, &value, sizeof(value));
+    return;
+  }
   out[0] = static_cast<std::uint8_t>((value >> 24) & 0xffU);
   out[1] = static_cast<std::uint8_t>((value >> 16) & 0xffU);
   out[2] = static_cast<std::uint8_t>((value >> 8) & 0xffU);
