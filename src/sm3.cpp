@@ -14,31 +14,54 @@ constexpr std::array<std::uint32_t, 8> kIv = {
     0x7380166fU, 0x4914b2b9U, 0x172442d7U, 0xda8a0600U,
     0xa96f30bcU, 0x163138aaU, 0xe38dee4dU, 0xb0fb0e4eU};
 
-std::uint32_t rotl(std::uint32_t value, int bits) {
+constexpr std::uint32_t rotl(std::uint32_t value, int bits) noexcept {
+  bits &= 31;
+  if (bits == 0) {
+    return value;
+  }
   return (value << bits) | (value >> (32 - bits));
 }
 
-std::uint32_t p0(std::uint32_t x) { return x ^ rotl(x, 9) ^ rotl(x, 17); }
-
-std::uint32_t p1(std::uint32_t x) { return x ^ rotl(x, 15) ^ rotl(x, 23); }
-
-std::uint32_t ff(std::uint32_t x,
-                 std::uint32_t y,
-                 std::uint32_t z,
-                 int round) {
-  if (round <= 15) {
-    return x ^ y ^ z;
+constexpr std::array<std::uint32_t, 64> make_tj_rot() {
+  std::array<std::uint32_t, 64> out{};
+  for (std::size_t j = 0; j < out.size(); ++j) {
+    const auto tj = (j <= 15) ? 0x79cc4519U : 0x7a879d8aU;
+    out[j] = rotl(tj, static_cast<int>(j % 32U));
   }
+  return out;
+}
+
+constexpr auto kTjRot = make_tj_rot();
+
+constexpr std::uint32_t p0(std::uint32_t x) noexcept {
+  return x ^ rotl(x, 9) ^ rotl(x, 17);
+}
+
+constexpr std::uint32_t p1(std::uint32_t x) noexcept {
+  return x ^ rotl(x, 15) ^ rotl(x, 23);
+}
+
+constexpr std::uint32_t ff0(std::uint32_t x,
+                            std::uint32_t y,
+                            std::uint32_t z) noexcept {
+  return x ^ y ^ z;
+}
+
+constexpr std::uint32_t ff1(std::uint32_t x,
+                            std::uint32_t y,
+                            std::uint32_t z) noexcept {
   return (x & y) | (x & z) | (y & z);
 }
 
-std::uint32_t gg(std::uint32_t x,
-                 std::uint32_t y,
-                 std::uint32_t z,
-                 int round) {
-  if (round <= 15) {
-    return x ^ y ^ z;
-  }
+constexpr std::uint32_t gg0(std::uint32_t x,
+                            std::uint32_t y,
+                            std::uint32_t z) noexcept {
+  return x ^ y ^ z;
+}
+
+constexpr std::uint32_t gg1(std::uint32_t x,
+                            std::uint32_t y,
+                            std::uint32_t z) noexcept {
   return (x & y) | (~x & z);
 }
 
@@ -155,17 +178,28 @@ void Sm3::compress(const std::uint8_t block[64]) {
   std::uint32_t g = state_[6];
   std::uint32_t h = state_[7];
 
-  for (int j = 0; j < 64; ++j) {
-    const std::uint32_t tj = (j <= 15) ? 0x79cc4519U : 0x7a879d8aU;
-    const std::uint32_t ss1 =
-        rotl(rotl(a, 12) + e + rotl(tj, j % 32), 7);
-    const std::uint32_t ss2 = ss1 ^ rotl(a, 12);
-    const std::uint32_t tt1 =
-        ff(a, b, c, j) + d + ss2 +
-        (w[static_cast<std::size_t>(j)] ^
-         w[static_cast<std::size_t>(j + 4)]);
-    const std::uint32_t tt2 =
-        gg(e, f, g, j) + h + ss1 + w[static_cast<std::size_t>(j)];
+  for (std::size_t j = 0; j < 16; ++j) {
+    const std::uint32_t a12 = rotl(a, 12);
+    const std::uint32_t ss1 = rotl(a12 + e + kTjRot[j], 7);
+    const std::uint32_t ss2 = ss1 ^ a12;
+    const std::uint32_t tt1 = ff0(a, b, c) + d + ss2 + (w[j] ^ w[j + 4]);
+    const std::uint32_t tt2 = gg0(e, f, g) + h + ss1 + w[j];
+    d = c;
+    c = rotl(b, 9);
+    b = a;
+    a = tt1;
+    h = g;
+    g = rotl(f, 19);
+    f = e;
+    e = p0(tt2);
+  }
+
+  for (std::size_t j = 16; j < 64; ++j) {
+    const std::uint32_t a12 = rotl(a, 12);
+    const std::uint32_t ss1 = rotl(a12 + e + kTjRot[j], 7);
+    const std::uint32_t ss2 = ss1 ^ a12;
+    const std::uint32_t tt1 = ff1(a, b, c) + d + ss2 + (w[j] ^ w[j + 4]);
+    const std::uint32_t tt2 = gg1(e, f, g) + h + ss1 + w[j];
     d = c;
     c = rotl(b, 9);
     b = a;

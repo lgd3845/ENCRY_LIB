@@ -16,22 +16,47 @@ constexpr std::size_t kSm3DigestSize = 32;
 
 }  // namespace
 
-HmacSm3::HmacSm3(std::span<const std::uint8_t> key)
-    : outer_pad_(kSm3BlockSize) {
-  SecureBytes normalized(kSm3BlockSize);
+HmacSm3::HmacSm3(std::span<const std::uint8_t> key) {
+  std::array<std::uint8_t, kSm3BlockSize> normalized{};
   if (key.size() > kSm3BlockSize) {
-    const auto digest = sm3(key);
-    std::copy(digest.begin(), digest.end(), normalized.vec().begin());
+    auto digest = sm3(key);
+    std::copy(digest.begin(), digest.end(), normalized.begin());
+    secure_zero(digest.data(), digest.size());
   } else {
-    std::copy(key.begin(), key.end(), normalized.vec().begin());
+    std::copy(key.begin(), key.end(), normalized.begin());
   }
 
-  SecureBytes inner_pad(kSm3BlockSize);
+  std::array<std::uint8_t, kSm3BlockSize> inner_pad{};
   for (std::size_t i = 0; i < kSm3BlockSize; ++i) {
-    inner_pad.vec()[i] = normalized.vec()[i] ^ 0x36U;
-    outer_pad_.vec()[i] = normalized.vec()[i] ^ 0x5cU;
+    inner_pad[i] = normalized[i] ^ 0x36U;
+    outer_pad_[i] = normalized[i] ^ 0x5cU;
   }
-  inner_.update(inner_pad.span());
+  inner_.update(inner_pad);
+  secure_zero(inner_pad.data(), inner_pad.size());
+  secure_zero(normalized.data(), normalized.size());
+}
+
+HmacSm3::~HmacSm3() {
+  inner_.reset();
+  secure_zero(outer_pad_.data(), outer_pad_.size());
+}
+
+HmacSm3::HmacSm3(HmacSm3&& other) noexcept
+    : inner_(other.inner_), outer_pad_(other.outer_pad_) {
+  other.inner_.reset();
+  secure_zero(other.outer_pad_.data(), other.outer_pad_.size());
+}
+
+HmacSm3& HmacSm3::operator=(HmacSm3&& other) noexcept {
+  if (this != &other) {
+    inner_.reset();
+    secure_zero(outer_pad_.data(), outer_pad_.size());
+    inner_ = other.inner_;
+    outer_pad_ = other.outer_pad_;
+    other.inner_.reset();
+    secure_zero(other.outer_pad_.data(), other.outer_pad_.size());
+  }
+  return *this;
 }
 
 void HmacSm3::update(std::span<const std::uint8_t> data) {
@@ -39,11 +64,13 @@ void HmacSm3::update(std::span<const std::uint8_t> data) {
 }
 
 Hash32 HmacSm3::final() {
-  const auto inner_digest = inner_.final();
+  auto inner_digest = inner_.final();
   Sm3 outer;
-  outer.update(outer_pad_.span());
+  outer.update(outer_pad_);
   outer.update(inner_digest);
-  return outer.final();
+  auto result = outer.final();
+  secure_zero(inner_digest.data(), inner_digest.size());
+  return result;
 }
 
 Hash32 hmac_sm3(std::span<const std::uint8_t> key,

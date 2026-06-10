@@ -24,6 +24,14 @@ std::span<const std::uint8_t> str_bytes(std::string_view s) {
       reinterpret_cast<const std::uint8_t*>(s.data()), s.size());
 }
 
+std::array<std::uint8_t, 8> be64(std::uint64_t value) {
+  std::array<std::uint8_t, 8> out{};
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    out[i] = static_cast<std::uint8_t>((value >> (56U - i * 8U)) & 0xffU);
+  }
+  return out;
+}
+
 void fill_random_getrandom(std::span<std::uint8_t> out) {
   while (!out.empty()) {
     const ssize_t n = getrandom(out.data(), out.size(), 0);
@@ -67,16 +75,13 @@ Hash32 compute_tag(std::span<const std::uint8_t> mac_key,
   HmacSm3 hmac(mac_key);
   hmac.update(str_bytes(kMacDomain));
 
-  Bytes len;
-  len.reserve(16);
-  append_u64(len, static_cast<std::uint64_t>(aad.size()));
+  auto len = be64(static_cast<std::uint64_t>(aad.size()));
   hmac.update(len);
   hmac.update(aad);
-  len.clear();
 
   hmac.update(nonce);
 
-  append_u64(len, static_cast<std::uint64_t>(ciphertext.size()));
+  len = be64(static_cast<std::uint64_t>(ciphertext.size()));
   hmac.update(len);
   hmac.update(ciphertext);
   secure_zero(len.data(), len.size());
@@ -132,9 +137,10 @@ Bytes derive_bytes(std::span<const std::uint8_t> key,
 
 Hash32 derive_key32(std::span<const std::uint8_t> key,
                     const std::string& info) {
-  const auto derived = derive_bytes(key, info, 32);
+  auto derived = derive_bytes(key, info, 32);
   Hash32 out{};
   std::copy(derived.begin(), derived.end(), out.begin());
+  secure_zero(derived.data(), derived.size());
   return out;
 }
 

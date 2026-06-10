@@ -45,9 +45,42 @@ constexpr std::array<std::uint32_t, 32> kCk = {
     0xbcc3cad1U, 0xd8dfe6edU, 0xf4fb0209U, 0x10171e25U, 0x2c333a41U,
     0x484f565dU, 0x646b7279U};
 
-std::uint32_t rotl(std::uint32_t value, int bits) {
+constexpr std::uint32_t rotl(std::uint32_t value, int bits) noexcept {
+  bits &= 31;
+  if (bits == 0) {
+    return value;
+  }
   return (value << bits) | (value >> (32 - bits));
 }
+
+constexpr std::uint32_t linear(std::uint32_t value) noexcept {
+  return value ^ rotl(value, 2) ^ rotl(value, 10) ^ rotl(value, 18) ^
+         rotl(value, 24);
+}
+
+constexpr std::uint32_t linear_key(std::uint32_t value) noexcept {
+  return value ^ rotl(value, 13) ^ rotl(value, 23);
+}
+
+template <int Shift, bool KeySchedule>
+constexpr std::array<std::uint32_t, 256> make_transform_table() {
+  std::array<std::uint32_t, 256> table{};
+  for (std::size_t i = 0; i < table.size(); ++i) {
+    const auto word = static_cast<std::uint32_t>(kSbox[i]) << Shift;
+    table[i] = KeySchedule ? linear_key(word) : linear(word);
+  }
+  return table;
+}
+
+constexpr auto kEncT0 = make_transform_table<24, false>();
+constexpr auto kEncT1 = make_transform_table<16, false>();
+constexpr auto kEncT2 = make_transform_table<8, false>();
+constexpr auto kEncT3 = make_transform_table<0, false>();
+
+constexpr auto kKeyT0 = make_transform_table<24, true>();
+constexpr auto kKeyT1 = make_transform_table<16, true>();
+constexpr auto kKeyT2 = make_transform_table<8, true>();
+constexpr auto kKeyT3 = make_transform_table<0, true>();
 
 std::uint32_t read_be32(const std::uint8_t* bytes) {
   return (static_cast<std::uint32_t>(bytes[0]) << 24) |
@@ -63,26 +96,16 @@ void write_be32(std::uint32_t value, std::uint8_t* out) {
   out[3] = static_cast<std::uint8_t>(value & 0xffU);
 }
 
-std::uint32_t tau(std::uint32_t value) {
-  return (static_cast<std::uint32_t>(kSbox[(value >> 24) & 0xffU]) << 24) |
-         (static_cast<std::uint32_t>(kSbox[(value >> 16) & 0xffU]) << 16) |
-         (static_cast<std::uint32_t>(kSbox[(value >> 8) & 0xffU]) << 8) |
-         static_cast<std::uint32_t>(kSbox[value & 0xffU]);
+std::uint32_t transform(std::uint32_t value) {
+  return kEncT0[(value >> 24) & 0xffU] ^
+         kEncT1[(value >> 16) & 0xffU] ^
+         kEncT2[(value >> 8) & 0xffU] ^ kEncT3[value & 0xffU];
 }
-
-std::uint32_t linear(std::uint32_t value) {
-  return value ^ rotl(value, 2) ^ rotl(value, 10) ^ rotl(value, 18) ^
-         rotl(value, 24);
-}
-
-std::uint32_t linear_key(std::uint32_t value) {
-  return value ^ rotl(value, 13) ^ rotl(value, 23);
-}
-
-std::uint32_t transform(std::uint32_t value) { return linear(tau(value)); }
 
 std::uint32_t transform_key(std::uint32_t value) {
-  return linear_key(tau(value));
+  return kKeyT0[(value >> 24) & 0xffU] ^
+         kKeyT1[(value >> 16) & 0xffU] ^
+         kKeyT2[(value >> 8) & 0xffU] ^ kKeyT3[value & 0xffU];
 }
 
 void increment_counter(Block16& counter) {
