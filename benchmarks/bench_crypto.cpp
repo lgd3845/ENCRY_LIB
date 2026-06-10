@@ -23,12 +23,25 @@ double measure_seconds(Fn&& fn) {
   return std::chrono::duration<double>(end - start).count();
 }
 
-double bytes_to_gb(std::size_t bytes) {
-  return static_cast<double>(bytes) / 1'000'000'000.0;
+bool use_gb_unit(std::size_t bytes) {
+  return bytes >= 1'000'000'000ULL;
 }
 
-double gb_per_second(std::size_t bytes, double seconds) {
-  return bytes_to_gb(bytes) / seconds;
+double display_size(std::size_t bytes) {
+  const double scale = use_gb_unit(bytes) ? 1'000'000'000.0 : 1'000'000.0;
+  return static_cast<double>(bytes) / scale;
+}
+
+const char* size_unit(std::size_t bytes) {
+  return use_gb_unit(bytes) ? "GB" : "MB";
+}
+
+const char* rate_unit(std::size_t bytes) {
+  return use_gb_unit(bytes) ? "GB/s" : "MB/s";
+}
+
+double display_rate(std::size_t bytes, double seconds) {
+  return display_size(bytes) / seconds;
 }
 
 std::vector<std::uint8_t> make_payload(std::size_t size) {
@@ -54,12 +67,16 @@ int main() {
       128U * 1024U * 1024U,
       512U * 1024U * 1024U,
       1'000'000'000U,
+      2'000'000'000ULL,
+      4'000'000'000ULL,
   };
 
-  std::cout << "size_bytes,size_gb,encrypt_s,decrypt_s,encrypt_gb_s,decrypt_gb_s\n";
+  std::cout << "size_bytes,size_value,size_unit,encrypt_s,decrypt_s,"
+               "encrypt_rate,decrypt_rate,rate_unit\n";
   std::cout << std::fixed << std::setprecision(3);
   for (const auto size : sizes) {
-    const auto payload = make_payload(size);
+    auto payload = make_payload(size);
+    const auto expected_size = payload.size();
     if (size <= 128U * 1024U * 1024U) {
       auto blob =
           encrylib::encrypt_blob(enc_key, mac_key, payload, bytes_of(aad));
@@ -71,17 +88,20 @@ int main() {
       measured_blob =
           encrylib::encrypt_blob(enc_key, mac_key, payload, bytes_of(aad));
     });
+    std::vector<std::uint8_t>().swap(payload);
+
     const double dec_s = measure_seconds([&] {
       const auto plain =
           encrylib::decrypt_blob(enc_key, mac_key, measured_blob, bytes_of(aad));
-      if (plain.size() != payload.size()) {
+      if (plain.size() != expected_size) {
         throw std::runtime_error("benchmark decrypt size mismatch");
       }
     });
 
-    std::cout << size << "," << bytes_to_gb(size) << "," << enc_s << ","
-              << dec_s << "," << gb_per_second(size, enc_s) << ","
-              << gb_per_second(size, dec_s) << "\n";
+    std::cout << size << "," << display_size(size) << "," << size_unit(size)
+              << "," << enc_s << "," << dec_s << ","
+              << display_rate(size, enc_s) << ","
+              << display_rate(size, dec_s) << "," << rate_unit(size) << "\n";
   }
   return 0;
 }
