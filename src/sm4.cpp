@@ -4,6 +4,8 @@
 #include <array>
 #include <cstring>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 namespace encrylib {
 
@@ -44,6 +46,11 @@ constexpr std::array<std::uint32_t, 32> kCk = {
     0x30373e45U, 0x4c535a61U, 0x686f767dU, 0x848b9299U, 0xa0a7aeb5U,
     0xbcc3cad1U, 0xd8dfe6edU, 0xf4fb0209U, 0x10171e25U, 0x2c333a41U,
     0x484f565dU, 0x646b7279U};
+
+constexpr std::size_t kCtrBlockSize = 16;
+constexpr std::size_t kParallelCtrThreshold = 16U * 1024U * 1024U;
+constexpr std::size_t kParallelBytesPerWorker = 8U * 1024U * 1024U;
+constexpr std::size_t kMaxCtrWorkers = 8;
 
 constexpr std::uint32_t rotl(std::uint32_t value, int bits) noexcept {
   bits &= 31;
@@ -117,6 +124,15 @@ void increment_counter(Block16& counter) {
   }
 }
 
+void add_counter(Block16& counter, std::uint64_t blocks) {
+  for (auto it = counter.rbegin(); it != counter.rend() && blocks != 0; ++it) {
+    const auto sum = static_cast<std::uint16_t>(*it) +
+                     static_cast<std::uint16_t>(blocks & 0xffU);
+    *it = static_cast<std::uint8_t>(sum & 0xffU);
+    blocks = (blocks >> 8U) + (sum >> 8U);
+  }
+}
+
 Block16 crypt_block_compact(const Block16& block,
                             const std::array<std::uint32_t, 32>& round_keys,
                             bool decrypt,
@@ -166,6 +182,23 @@ void xor_stream(std::span<const std::uint8_t> input,
   for (; i < input.size(); ++i) {
     output[i] = input[i] ^ stream[i];
   }
+}
+
+void ctr_crypt_range(const Block16& start_counter,
+                     std::span<const std::uint8_t> input,
+                     std::span<std::uint8_t> output,
+                     const std::array<std::uint32_t, 32>& round_keys) {
+  Block16 counter = start_counter;
+  std::size_t offset = 0;
+  while (offset < input.size()) {
+    const auto stream = crypt_block_compact(counter, round_keys, false, false);
+    const auto take =
+        std::min<std::size_t>(stream.size(), input.size() - offset);
+    xor_stream(input.subspan(offset, take), stream, output.subspan(offset, take));
+    increment_counter(counter);
+    offset += take;
+  }
+  secure_zero(counter.data(), counter.size());
 }
 
 }  // namespace
@@ -218,16 +251,52 @@ void Sm4::ctr_crypt(const Block16& nonce,
   if (output.size() != input.size()) {
     throw std::runtime_error("SM4-CTR input/output size mismatch");
   }
-  Block16 counter = nonce;
-  std::size_t offset = 0;
-  while (offset < input.size()) {
-    const auto stream = crypt_block_compact(counter, round_keys_, false, false);
-    const auto take = std::min<std::size_t>(stream.size(), input.size() - offset);
-    xor_stream(input.subspan(offset, take), stream, output.subspan(offset, take));
-    increment_counter(counter);
-    offset += take;
+  if (input.empty()) {
+    return;
   }
-  secure_zero(counter.data(), counter.size());
+
+  const auto total_blocks = (input.size() + kCtrBlockSize - 1U) / kCtrBlockSize;
+  const auto hardware_workers =
+      std::max<std::size_t>(1, std::thread::hardware_concurrency());
+  const auto size_workers =
+      (input.size() + kParallelBytesPerWorker - 1U) / kParallelBytesPerWorker;
+  const auto worker_count =
+      std::min({hardware_workers, size_workers, total_blocks, kMaxCtrWorkers});
+  if (input.size() < kParallelCtrThreshold || worker_count <= 1) {
+    ctr_crypt_range(nonce, input, output, round_keys_);
+    return;
+  }
+
+  const auto blocks_per_worker = (total_blocks + worker_count - 1U) / worker_count;
+  std::vector<std::jthread> workers;
+  workers.reserve(worker_count - 1U);
+
+  for (std::size_t worker = 1; worker < worker_count; ++worker) {
+    const auto block_offset = worker * blocks_per_worker;
+    if (block_offset >= total_blocks) {
+      break;
+    }
+    const auto block_limit =
+        std::min(total_blocks, block_offset + blocks_per_worker);
+    const auto byte_offset = block_offset * kCtrBlockSize;
+    const auto byte_limit =
+        std::min(input.size(), block_limit * kCtrBlockSize);
+    const auto byte_count = byte_limit - byte_offset;
+
+    workers.emplace_back([&, block_offset, byte_offset, byte_count] {
+      Block16 chunk_counter = nonce;
+      add_counter(chunk_counter, static_cast<std::uint64_t>(block_offset));
+      ctr_crypt_range(chunk_counter, input.subspan(byte_offset, byte_count),
+                      output.subspan(byte_offset, byte_count), round_keys_);
+      secure_zero(chunk_counter.data(), chunk_counter.size());
+    });
+  }
+
+  const auto first_block_limit = std::min(total_blocks, blocks_per_worker);
+  const auto first_byte_count =
+      std::min(input.size(), first_block_limit * kCtrBlockSize);
+  ctr_crypt_range(nonce, input.subspan(0, first_byte_count),
+                  output.subspan(0, first_byte_count), round_keys_);
 }
 
 void Sm4::ctr_crypt_in_place(const Block16& nonce,

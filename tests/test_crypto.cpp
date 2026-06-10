@@ -61,6 +61,29 @@ void test_sm4() {
   expect(decrypted == block, "SM4 decrypt vector failed");
 }
 
+void test_sm4_ctr_parallel_roundtrip() {
+  const auto key = encrylib::hex_decode("0123456789abcdeffedcba9876543210");
+  encrylib::Block16 nonce{};
+  for (std::size_t i = 0; i < nonce.size(); ++i) {
+    nonce[i] = static_cast<std::uint8_t>(i * 17U + 3U);
+  }
+
+  constexpr std::size_t kPayloadSize = 20U * 1024U * 1024U + 37U;
+  encrylib::Bytes plain(kPayloadSize);
+  std::uint32_t state = 0x31415926U;
+  for (auto& byte : plain) {
+    state = state * 1103515245U + 12345U;
+    byte = static_cast<std::uint8_t>(state >> 24);
+  }
+
+  encrylib::Bytes cipher(plain.size());
+  encrylib::Bytes roundtrip(plain.size());
+  encrylib::Sm4 sm4(key);
+  sm4.ctr_crypt(nonce, plain, cipher);
+  sm4.ctr_crypt(nonce, cipher, roundtrip);
+  expect(roundtrip == plain, "SM4-CTR parallel roundtrip failed");
+}
+
 void test_authenticated_blob() {
   const auto enc_key = encrylib::random_bytes(32);
   const auto mac_key = encrylib::random_bytes(32);
@@ -126,6 +149,7 @@ int main() {
   try {
     test_sm3();
     test_sm4();
+    test_sm4_ctr_parallel_roundtrip();
     test_authenticated_blob();
     test_vault_roundtrip();
     std::cout << "all tests passed\n";
