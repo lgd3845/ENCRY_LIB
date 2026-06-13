@@ -1,5 +1,9 @@
 # 国密保密文件库设计与测试报告
 
+姓名：廖国栋	学号：PB24051115
+
+Github Link：https://github.com/lgd3845/ENCRY_LIB
+
 ## 目标与实现范围
 
 本项目实现了一个 C++20 原生 Linux 可执行程序 `encrylib`，支持：
@@ -110,6 +114,92 @@
 - 不防止完整目录回滚攻击；攻击者若保存旧版 `vault.meta`、`manifest.bin` 和对象文件并整体替换，本地离线格式无法独立发现。
 - `--password` 和 `ENCRYLIB_PASSWORD` 便于自动化，但可能被 shell 历史、进程环境或同机用户观察；人工使用建议交互输入。
 - 默认“移入文件库后删除源文件”使用普通文件删除语义，不保证覆盖原磁盘扇区；对 SSD、日志文件系统和备份系统不承诺安全擦除。
+
+## 实际攻击验证
+
+本节不把弱口令字典枚举作为主要攻击手段。弱口令攻击只能说明口令强度不足时 PBKDF2 仍会被离线试探，结论较平凡。实际验证重点放在两个更贴近日常使用的攻击面：运行时口令泄漏和完整目录回滚。
+
+### 攻击一：通过进程参数窃取强口令并解密文件库
+
+攻击条件：
+
+- 合法用户为了脚本化操作使用 `--password` 传入口令。
+- 攻击者能在同一台 Linux 主机上观察该用户进程的 `/proc/<pid>/cmdline`，或等价地能读取进程命令行。
+- 攻击者不需要破解 SM4、SM3、HMAC 或 PBKDF2，也不需要猜测口令。
+
+实验过程：
+
+- 创建临时文件库，口令设为 43 字符的强口令 `Strong-Passphrase-2026-!@#-not-a-dictionary`。
+- 合法用户执行一次大文件 `add` 操作，使进程持续运行足够长时间。
+- 攻击者读取 `/proc/<pid>/cmdline`，从命令行中直接得到 `--password` 后面的口令。
+- 攻击者随后使用窃取到的口令执行 `list` 和 `extract`。
+
+本机复现结果：
+
+```text
+password_strength=strong non-dictionary demo password, length 43
+cmdline_contains_password=True
+stolen_password=Strong-Passphrase-2026-!@#-not-a-dictionary
+attacker_list_output:
+NAME            SIZE        ADDED_UTC
+large.bin       268435456   2026-06-13T15:40:43Z
+classified.txt  61          2026-06-13T15:40:44Z
+recovered_plaintext=confidential payload recovered through process password leak
+```
+
+结论：
+
+- 该攻击对强口令同样有效，因为攻击者拿到的是明文口令本身，而不是进行口令猜测。
+- 加密认证封装仍然有效；被绕过的是口令输入接口的保密性。
+- `ENCRYLIB_PASSWORD` 也存在同类风险。本机测试中，进程运行时 `/proc/<pid>/environ` 可观察到 `ENCRYLIB_PASSWORD=EnvLeak-2026`。
+- 因此 `--password` 和环境变量只能用于受控测试或一次性脚本。人工使用应采用交互式输入，并尽量避免在共享主机、日志系统或可被其他本地用户观察的环境中运行。
+
+改进方向：
+
+- 默认文档中进一步弱化 `--password` 的推荐程度，将其标注为测试接口。
+- 对自动化场景提供从受限权限文件描述符或标准输入读取口令的方式，避免口令进入命令行和环境变量。
+- 在程序启动后尽早清理保存命令行参数的普通 `std::string` 副本；这不能消除 `/proc/<pid>/cmdline` 暴露，但可以减少进程内存中的额外明文副本。
+
+### 攻击二：完整目录回滚恢复已删除文件
+
+攻击条件：
+
+- 攻击者能在某一时刻复制整个文件库目录。
+- 合法用户之后删除或更新了文件。
+- 攻击者后来能把文件库目录整体替换回旧副本。
+- 攻击者不需要知道口令，也不需要伪造 HMAC。
+
+实验过程：
+
+- 创建文件库并加入 `revoked.txt`。
+- 攻击者复制整个文件库目录作为旧快照。
+- 合法用户执行 `remove revoked.txt`，此时 `list` 为空。
+- 攻击者用旧快照整体替换当前文件库目录。
+- 合法用户再次解锁后，旧清单和旧对象都能通过认证，`revoked.txt` 重新出现并可被恢复。
+
+本机复现结果：
+
+```text
+after_delete:
+NAME    SIZE    ADDED_UTC
+
+after_full_directory_rollback:
+NAME         SIZE  ADDED_UTC
+revoked.txt  41    2026-06-13T15:41:12Z
+recovered_after_rollback=old secret that should have been deleted
+```
+
+结论：
+
+- HMAC 能证明旧快照在生成时是合法的，但不能证明它是最新状态。
+- 该攻击破坏的是新鲜性和删除语义，而不是单个文件密文的认证完整性。
+- 纯本地、纯离线文件格式无法独立区分“当前合法状态”和“历史合法状态”。
+
+改进方向：
+
+- 引入外部单调状态，例如受权限保护的版本文件、远端同步日志、TPM/硬件计数器或服务端时间戳。
+- 对关键删除操作记录不可回滚审计日志，并把日志锚定到文件库目录之外。
+- 在报告和 README 中明确说明：本项目保护离线机密性和篡改检测，不承诺抵抗拥有旧快照的完整目录回滚攻击。
 
 ## 构建与运行
 
